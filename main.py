@@ -7,11 +7,19 @@ import itertools
 import warnings
 import time
 import os
-from stable_baselines3.common.utils import get_schedule_fn  # Added for custom_objects
-from flask import Flask  # Added for Render
-from threading import Thread  # Added for Flask threading
+from stable_baselines3.common.utils import get_schedule_fn
+from flask import Flask
+from threading import Thread
+import logging  # Added for logging
 
-# Flask keep-alive server (minimal addition for Render)
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Flask keep-alive server
 app = Flask(__name__)
 @app.route('/healthz')
 def health_check():
@@ -25,26 +33,26 @@ LOCK_FILE = "bot.lock"
 
 # Check if another instance is running
 if os.path.exists(LOCK_FILE):
-    print(f"Error: Another instance of the bot is running. Remove {LOCK_FILE} to force start.")
+    logger.error(f"Another instance of the bot is running. Remove {LOCK_FILE} to force start.")
     exit(1)
 else:
     with open(LOCK_FILE, "w") as f:
-        f.write(str(os.getpid()))  # Write the process ID to the lock file
-    print(f"Lock file created with PID {os.getpid()}")
+        f.write(str(os.getpid()))
+    logger.info(f"Lock file created with PID {os.getpid()}")
 
-# Load the trained model with custom_objects (minimal fix)
-print("Starting to load DQN model...")
+# Load the trained model with custom_objects
+logger.info("Starting to load DQN model...")
 try:
     custom_objects = {
         'lr_schedule': get_schedule_fn(0.001),
         'exploration_schedule': get_schedule_fn(0.1)
     }
     dqn_model = DQN.load('dqn_betting_model', custom_objects=custom_objects)
-    print("Model loaded successfully.")
-    print(f"DQN model observation space: {dqn_model.observation_space}")  # Debug print to confirm shape
+    logger.info("Model loaded successfully.")
+    logger.info(f"DQN model observation space: {dqn_model.observation_space}")
 except Exception as e:
-    print(f"Error loading model: {e}")
-    os.remove(LOCK_FILE)  # Clean up lock file on error
+    logger.error(f"Error loading model: {e}")
+    os.remove(LOCK_FILE)
     exit(1)
 
 # States for conversation
@@ -73,18 +81,16 @@ def prepare_live_input(recent_outcomes, lookback=20):
     start_time = time.time()
     if not recent_outcomes:
         raise ValueError("recent_outcomes is empty. Cannot prepare input for prediction.")
-    # Use the last 10 outcomes (or fewer if not enough)
-    df = pd.DataFrame({'Outcome': recent_outcomes[-10:]})  # Limit to last 10 outcomes
+    df = pd.DataFrame({'Outcome': recent_outcomes[-10:]})
     df['Outcome'] = df['Outcome'].map({'Big': 1, 'Small': 0})
     df['Streak'] = df['Outcome'].rolling(window=5, min_periods=1).sum().fillna(0)
     df['Trap_Risk'] = df['Outcome'].diff().abs().rolling(window=5, min_periods=1).mean().fillna(0)
     features = df[['Outcome', 'Streak', 'Trap_Risk']].values
-    # Pad with zeros to ensure 20 timesteps
     if len(features) < lookback:
         padding = np.zeros((lookback - len(features), 3), dtype=np.float32)
         features = np.vstack((padding, features))
     end_time = time.time()
-    print(f"prepare_live_input took {end_time - start_time:.4f} seconds for {len(recent_outcomes)} outcomes")
+    logger.debug(f"prepare_live_input took {end_time - start_time:.4f} seconds for {len(recent_outcomes)} outcomes")
     return features.astype(np.float32)
 
 # Function to predict next outcome using DQN with timing
@@ -93,18 +99,17 @@ def predict_next_outcome(recent_outcomes):
     try:
         obs = prepare_live_input(recent_outcomes, lookback=20)
         assert obs.shape == (20, 3), f"Expected shape (20, 3), got {obs.shape}"
-        # Reshape to (1, 20, 3) if the model expects (n_env, 20, 3)
         if len(dqn_model.observation_space.shape) == 3 and dqn_model.observation_space.shape[1:] == (20, 3):
             obs = obs.reshape(1, 20, 3)
-            print(f"Reshaped obs to {obs.shape} for (n_env, 20, 3) environment")
+            logger.debug(f"Reshaped obs to {obs.shape} for (n_env, 20, 3) environment")
         action, _ = dqn_model.predict(obs, deterministic=True)
         predicted = 'Big' if action == 1 else 'Small'
         end_time = time.time()
-        print(f"Model prediction time: {end_time - start_time:.4f} seconds for history {recent_outcomes[-10:]}")
-        print(f"Predicted outcome: {predicted}")
+        logger.debug(f"Model prediction time: {end_time - start_time:.4f} seconds for history {recent_outcomes[-10:]}")
+        logger.info(f"Predicted outcome: {predicted}")
         return predicted
     except Exception as e:
-        print(f"Error in predict_next_outcome: {str(e)}")
+        logger.error(f"Error in predict_next_outcome: {str(e)}")
         raise
 
 # Create inline keyboard for outcomes
@@ -168,7 +173,7 @@ def format_prediction_message(history, predictions, wins, predicted, loss_freq_6
         start_idx = max(0, len(predictions) - 10)
         for i in range(start_idx, len(predictions)):
             bet = predictions[i]
-            result = "💸" * (7 if wins[i] else 0)  # 7 money icons for wins
+            result = "💸" * (7 if wins[i] else 0)
             history_display += f"{bet} {result}\n"
     streak_info = f"**Current Streak:** {current_streak_length} wins | **Max Streak:** {max_streak_length} wins\n"
     loss_freq_display = f"**6 Consecutive Losses Frequency:** {loss_freq_6}\n"
@@ -213,30 +218,33 @@ def calculate_streak_frequencies(losses, wins):
 
 # Reset function to clear state and restart
 def reset_state(context):
-    context.user_data.clear()
-    context.user_data['outcomes'] = []
-    context.user_data['step'] = 0
-    context.user_data['history'] = []
-    context.user_data['predictions'] = []
-    context.user_data['correct'] = 0
-    context.user_data['total_bets'] = 0
-    context.user_data['reward'] = 0
-    context.user_data['losses'] = []
-    context.user_data['wins'] = []
-    context.user_data['initial_outcomes_collected'] = False
-    context.user_data['current_streak_length'] = 0
-    context.user_data['max_streak_length'] = 0
-    context.user_data['loss_streak_length'] = 0
-    context.user_data['skip_count'] = 0
-    context.user_data['play_with_streak'] = False
-    context.user_data['wait_count'] = 0
-    context.user_data['message_ids'] = []  # Store bot message IDs for 10-win deletion
-    context.user_data['all_message_ids'] = []  # Store all message IDs for clearing history
-    context.user_data['apology_triggered'] = False  # Track if apology has been sent
-    context.user_data['last_feedback_time'] = 0  # Track last feedback time for debouncing
-    context.user_data['last_active_time'] = time.time()  # Track last active time
     chat_id = context.user_data.get('chat_id', 'unknown')
-    print(f"Reset state for user {chat_id} at {time.ctime()}")
+    context.user_data.clear()
+    context.user_data.update({
+        'outcomes': [],
+        'step': 0,
+        'history': [],
+        'predictions': [],
+        'correct': 0,
+        'total_bets': 0,
+        'reward': 0,
+        'losses': [],
+        'wins': [],
+        'initial_outcomes_collected': False,
+        'current_streak_length': 0,
+        'max_streak_length': 0,
+        'loss_streak_length': 0,
+        'skip_count': 0,
+        'play_with_streak': False,
+        'wait_count': 0,
+        'message_ids': [],
+        'all_message_ids': [],
+        'apology_triggered': False,
+        'last_feedback_time': 0,
+        'last_active_time': time.time(),
+        'chat_id': chat_id
+    })
+    logger.info(f"Reset state for user {chat_id} at {time.ctime()}")
 
 # Function to exit user session
 def exit_user(update, context):
@@ -246,8 +254,8 @@ def exit_user(update, context):
         chat_id = query.message.chat_id
     else:
         chat_id = update.message.chat_id
-    print(f"Exiting user session for chat_id: {chat_id}")
-    context.user_data.clear()  # Clear all user data
+    logger.info(f"Exiting user session for chat_id: {chat_id}")
+    context.user_data.clear()
     context.bot.send_message(chat_id=chat_id, text="🚪 Session exited. All processes cleared. Restart with `/start`.")
     return ConversationHandler.END
 
@@ -259,26 +267,26 @@ def check_inactivity(update, context):
 
     inactivity_duration = current_time - last_active
 
-    if inactivity_duration >= 120:  # 120 seconds inactivity
-        print(f"Automatic cleanup for chat_id {chat_id} due to 120 seconds inactivity")
+    if inactivity_duration >= 120:
+        logger.info(f"Automatic cleanup for chat_id {chat_id} due to 120 seconds inactivity")
         context.user_data.clear()
         context.bot.send_message(chat_id=chat_id, text=INACTIVITY_CLEANUP)
         return ConversationHandler.END
-    elif inactivity_duration >= 90:  # 90 seconds inactivity
+    elif inactivity_duration >= 90:
         if not context.user_data.get('inactivity_warning_sent', False):
-            print(f"Sending warning for chat_id {chat_id} due to 90 seconds inactivity")
+            logger.info(f"Sending warning for chat_id {chat_id} due to 90 seconds inactivity")
             sent_message = context.bot.send_message(chat_id=chat_id, text=INACTIVITY_WARNING)
             context.user_data['inactivity_warning_sent'] = True
             context.user_data['message_ids'].append(sent_message.message_id)
             context.user_data['all_message_ids'].append(sent_message.message_id)
 
-    context.user_data['last_active_time'] = current_time  # Update last active time
-    context.user_data['inactivity_warning_sent'] = False  # Reset warning flag on activity
+    context.user_data['last_active_time'] = current_time
+    context.user_data['inactivity_warning_sent'] = False
     return None
 
 # Function to send apology message
 def send_apology_message(update, context):
-    print("Debug: Sending apology message")
+    logger.debug("Sending apology message")
     if update.callback_query:
         query = update.callback_query
         query.answer()
@@ -293,19 +301,18 @@ def send_apology_message(update, context):
         )
     context.user_data['message_ids'].append(sent_message.message_id)
     context.user_data['all_message_ids'].append(sent_message.message_id)
-    context.user_data['apology_triggered'] = True  # Mark apology as sent
-    context.user_data['last_active_time'] = time.time()  # Update last active time
-    print("Debug: Transitioning to GET_OUTCOMES after apology")
+    context.user_data['apology_triggered'] = True
+    context.user_data['last_active_time'] = time.time()
+    logger.debug("Transitioning to GET_OUTCOMES after apology")
     return GET_OUTCOMES
 
 # Handle /start command
 def start(update, context):
     user = update.message.from_user
     chat_id = update.message.chat_id
-    context.user_data['chat_id'] = chat_id  # Store chat ID for debugging
-    reset_state(context)  # Ensure a fresh start every time /start is called
+    context.user_data['chat_id'] = chat_id
+    reset_state(context)
     
-    # Send welcome message with keyboard directly (Disclaimer removed)
     welcome_message = f"🎉 Hello {user.first_name}! Welcome to **Shitty Predicts** 🎉\nWhat was outcome 1?"
     sent_welcome = update.message.reply_text(
         welcome_message,
@@ -313,16 +320,14 @@ def start(update, context):
         reply_markup=get_outcome_keyboard(1)
     )
     context.user_data['message_ids'].append(sent_welcome.message_id)
-    context.user_data['all_message_ids'].append(update.message.message_id)  # User's /start
-    context.user_data['all_message_ids'].append(sent_welcome.message_id)  # Bot's welcome
-
-    context.user_data['last_active_time'] = time.time()  # Set initial active time
-    print(f"Debug: Transitioning to GET_OUTCOMES for user {chat_id}")
+    context.user_data['all_message_ids'].extend([update.message.message_id, sent_welcome.message_id])
+    context.user_data['last_active_time'] = time.time()
+    logger.debug(f"Transitioning to GET_OUTCOMES for user {chat_id}")
     return GET_OUTCOMES
 
 # Handle outcome selection
 def get_outcomes(update, context):
-    check_inactivity(update, context)  # Check inactivity before processing
+    check_inactivity(update, context)
     query = update.callback_query
     query.answer()
     step = context.user_data['step']
@@ -335,21 +340,19 @@ def get_outcomes(update, context):
         context.user_data['step'] = step + 1
         context.user_data['outcomes'] = outcomes
 
-        if step < 10:  # Collect only 10 outcomes
+        if step < 10:
             query.edit_message_text(
                 f"📝 Outcome {step} recorded: {outcome}. What was outcome {step + 1}?",
                 reply_markup=get_outcome_keyboard(step + 1)
             )
-            print(f"Debug: Staying in GET_OUTCOMES, step {step + 1}")
+            logger.debug(f"Staying in GET_OUTCOMES, step {step + 1}")
             return GET_OUTCOMES
         else:
-            context.user_data['history'] = outcomes[-10:]  # Limit to last 10 outcomes
+            context.user_data['history'] = outcomes[-10:]
             context.user_data['initial_outcomes_collected'] = True
             context.user_data['step'] = step
-            print(f"Debug: Transitioning to PREDICT with history = {context.user_data['history']}")
+            logger.debug(f"Transitioning to PREDICT with history = {context.user_data['history']}")
             query.edit_message_text("✅ Thanks! All 10 outcomes collected. Predicting the next outcome...")
-
-            # Explicitly call predict_next instead of relying on state transition
             return predict_next(update, context)
     elif query.data == "reset":
         reset_state(context)
@@ -359,7 +362,7 @@ def get_outcomes(update, context):
         )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        print("Debug: Reset triggered, transitioning to GET_OUTCOMES")
+        logger.debug("Reset triggered, transitioning to GET_OUTCOMES")
         return GET_OUTCOMES
     elif query.data == "clear_history":
         bot = context.bot
@@ -368,8 +371,7 @@ def get_outcomes(update, context):
             try:
                 bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception as e:
-                print(f"Failed to delete message {msg_id}: {e}")
-                continue
+                logger.error(f"Failed to delete message {msg_id}: {e}")
         context.user_data['all_message_ids'] = []
         context.user_data['message_ids'] = []
         sent_message = query.message.reply_text(
@@ -378,36 +380,34 @@ def get_outcomes(update, context):
         )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        print("Debug: Cleared history, transitioning to GET_OUTCOMES")
+        logger.debug("Cleared history, transitioning to GET_OUTCOMES")
         return GET_OUTCOMES
     elif query.data == "exit":
         return exit_user(update, context)
 
-    print("Debug: Staying in GET_OUTCOMES (default case)")
+    logger.debug("Staying in GET_OUTCOMES (default case)")
     return GET_OUTCOMES
 
 # Predict the next outcome
 def predict_next(update, context):
-    check_inactivity(update, context)  # Check inactivity before processing
+    check_inactivity(update, context)
     query = update.callback_query
     if query:
         query.answer()
 
-    print("Debug: Entered predict_next")
-    history = context.user_data['history'][-10:]  # Use only last 10 outcomes
-    if len(history) < 10:  # Ensure we have at least 10 outcomes
-        print(f"Error: history length is {len(history)}, expected at least 10. History: {history}")
+    logger.debug("Entered predict_next")
+    history = context.user_data['history'][-10:]
+    if len(history) < 10:
+        logger.error(f"history length is {len(history)}, expected at least 10. History: {history}")
+        error_msg = "⚠️ Internal error: Not enough history to make a prediction. Please provide more outcomes or reset."
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Reset", callback_data="reset"), InlineKeyboardButton("🚪 Exit", callback_data="exit")]])
         if update.callback_query:
-            update.callback_query.message.reply_text(
-                "⚠️ Internal error: Not enough history to make a prediction. Please provide more outcomes or reset.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Reset", callback_data="reset"), InlineKeyboardButton("🚪 Exit", callback_data="exit")]])
-            )
+            sent_message = update.callback_query.message.reply_text(error_msg, reply_markup=reply_markup)
         else:
-            update.message.reply_text(
-                "⚠️ Internal error: Not enough history to make a prediction. Please provide more outcomes or reset.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Reset", callback_data="reset"), InlineKeyboardButton("🚪 Exit", callback_data="exit")]])
-            )
-        print("Debug: Transitioning to GET_OUTCOMES due to insufficient history")
+            sent_message = update.message.reply_text(error_msg, reply_markup=reply_markup)
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].append(sent_message.message_id)
+        logger.debug("Transitioning to GET_OUTCOMES due to insufficient history")
         return GET_OUTCOMES
 
     predictions = context.user_data['predictions']
@@ -415,149 +415,109 @@ def predict_next(update, context):
     losses = context.user_data['losses']
     loss_freq, win_freq, max_losses, max_wins = calculate_streak_frequencies(losses, wins)
     loss_streak_length = context.user_data['loss_streak_length']
-    print(f"Debug: Current loss streak length = {loss_streak_length}")
+    logger.debug(f"Current loss streak length = {loss_streak_length}")
 
     start_time = time.time()
     try:
-        # Check for apology after 6 consecutive losses
         if loss_streak_length >= 6 and not context.user_data.get('apology_triggered', False):
-            print("Debug: Triggering apology for 6 consecutive losses")
-            return send_apology_message(update, context)  # Send apology and pause for next outcome
+            logger.debug("Triggering apology for 6 consecutive losses")
+            return send_apology_message(update, context)
 
-        # Check loss streak and wait if >= 5
         if loss_streak_length >= 5:
-            print("Debug: Triggering waiting phase for 5 consecutive losses")
-            wait_bets = min(4, 10 - len(history))  # Limit to 10 outcomes
+            logger.debug("Triggering waiting phase for 5 consecutive losses")
+            wait_bets = min(4, 10 - len(history))
             if context.user_data.get('wait_count', 0) < wait_bets:
                 context.user_data['wait_count'] = context.user_data.get('wait_count', 0) + 1
-                if update.callback_query:
-                    sent_message = update.callback_query.message.reply_text(
-                        f"⏳ **Loss Streak ({loss_streak_length}) Detected!** 🔴\n"
-                        f"Waiting and analyzing... (Bet {context.user_data['wait_count']}/{wait_bets})\n"
-                        "Please provide the next outcome.",
-                        reply_markup=get_outcome_keyboard(context.user_data['step'] + 1)
-                    )
-                else:
-                    sent_message = update.message.reply_text(
-                        f"⏳ **Loss Streak ({loss_streak_length}) Detected!** 🔴\n"
-                        f"Waiting and analyzing... (Bet {context.user_data['wait_count']}/{wait_bets})\n"
-                        "Please provide the next outcome.",
-                        reply_markup=get_outcome_keyboard(context.user_data['step'] + 1)
-                    )
+                msg = f"⏳ **Loss Streak ({loss_streak_length}) Detected!** 🔴\nWaiting and analyzing... (Bet {context.user_data['wait_count']}/{wait_bets})\nPlease provide the next outcome."
+                sent_message = (update.callback_query.message.reply_text if update.callback_query else update.message.reply_text)(
+                    msg, reply_markup=get_outcome_keyboard(context.user_data['step'] + 1)
+                )
                 context.user_data['message_ids'].append(sent_message.message_id)
                 context.user_data['all_message_ids'].append(sent_message.message_id)
-                print("Debug: Transitioning to GET_OUTCOMES for waiting phase")
+                logger.debug("Transitioning to GET_OUTCOMES for waiting phase")
                 return GET_OUTCOMES
             else:
                 context.user_data['wait_count'] = 0
-                print("Debug: Wait phase complete, making strong prediction")
+                logger.debug("Wait phase complete, making strong prediction")
                 predicted = predict_next_outcome(history)
                 context.user_data['play_with_streak'] = False
         else:
-            print("Debug: Checking for artificial streak")
-            # Check for artificial streak (4-5 consecutive same predictions)
-            if len(predictions) >= 4:
-                last_four = predictions[-4:]
-                if all(p == last_four[0] for p in last_four):
-                    print(f"Debug: Artificial streak detected with predictions: {predictions[-4:]}")
-                    if update.callback_query:
-                        sent_message = update.callback_query.message.reply_text(
-                            "⚠️ **Artificial Streak Detected!** 🚨\n"
-                            "It seems the streak (4-5 same outcomes) might be manipulated. Should we skip 1-2 bets to observe?\n"
-                            "Please confirm the outcome of the next bet...",
-                            reply_markup=get_skip_feedback_keyboard(1)
-                        )
-                    else:
-                        sent_message = update.message.reply_text(
-                            "⚠️ **Artificial Streak Detected!** 🚨\n"
-                            "It seems the streak (4-5 same outcomes) might be manipulated. Should we skip 1-2 bets to observe?\n"
-                            "Please confirm the outcome of the next bet...",
-                            reply_markup=get_skip_feedback_keyboard(1)
-                        )
-                    context.user_data['message_ids'].append(sent_message.message_id)
-                    context.user_data['all_message_ids'].append(sent_message.message_id)
-                    context.user_data['skip_count'] = 1
-                    print("Debug: Transitioning to SKIP_FEEDBACK due to artificial streak")
-                    return SKIP_FEEDBACK
+            logger.debug("Checking for artificial streak")
+            if len(predictions) >= 4 and all(p == predictions[-4] for p in predictions[-4:]):
+                logger.debug(f"Artificial streak detected with predictions: {predictions[-4:]}")
+                msg = "⚠️ **Artificial Streak Detected!** 🚨\nIt seems the streak (4-5 same outcomes) might be manipulated. Should we skip 1-2 bets to observe?\nPlease confirm the outcome of the next bet..."
+                sent_message = (update.callback_query.message.reply_text if update.callback_query else update.message.reply_text)(
+                    msg, reply_markup=get_skip_feedback_keyboard(1)
+                )
+                context.user_data['message_ids'].append(sent_message.message_id)
+                context.user_data['all_message_ids'].append(sent_message.message_id)
+                context.user_data['skip_count'] = 1
+                logger.debug("Transitioning to SKIP_FEEDBACK due to artificial streak")
+                return SKIP_FEEDBACK
 
-            print("Debug: Checking play_with_streak")
-            # Play with streak if active
+            logger.debug("Checking play_with_streak")
             if context.user_data.get('play_with_streak', False) and len(predictions) >= 1:
-                predicted = predictions[-1]  # Continue the streak
-                print("Debug: Continuing streak with prediction =", predicted)
+                predicted = predictions[-1]
+                logger.debug(f"Continuing streak with prediction = {predicted}")
             else:
-                print("Debug: Calling predict_next_outcome")
+                logger.debug("Calling predict_next_outcome")
                 predicted = predict_next_outcome(history)
 
         end_time = time.time()
-        print(f"Total prediction time: {end_time - start_time:.4f} seconds for history {history}")
+        logger.debug(f"Total prediction time: {end_time - start_time:.4f} seconds for history {history}")
         context.user_data['last_predicted'] = predicted
 
-        print("Debug: Formatting prediction message")
-        # Format and send the prediction message, store the message ID
+        logger.debug("Formatting prediction message")
         prediction_message = format_prediction_message(
             history, predictions, wins, predicted, loss_freq[6],
             context.user_data.get('current_streak_length', 0),
             context.user_data.get('max_streak_length', 0)
         )
-        print("Debug: Sending prediction message")
+        logger.debug("Sending prediction message")
         send_start = time.time()
-        if update.callback_query:
-            sent_message = update.callback_query.message.reply_text(
-                prediction_message,
-                parse_mode='Markdown',
-                reply_markup=get_feedback_keyboard()
-            )
-        else:
-            sent_message = update.message.reply_text(
-                prediction_message,
-                parse_mode='Markdown',
-                reply_markup=get_feedback_keyboard()
-            )
+        sent_message = (update.callback_query.message.reply_text if update.callback_query else update.message.reply_text)(
+            prediction_message, parse_mode='Markdown', reply_markup=get_feedback_keyboard()
+        )
         send_end = time.time()
-        print(f"Sending message took {send_end - send_start:.4f} seconds")
+        logger.debug(f"Sending message took {send_end - send_start:.4f} seconds")
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
 
         context.user_data['predictions'].append(predicted)
         context.user_data['total_bets'] += 1
-        print("Debug: Transitioning to GET_FEEDBACK after prediction")
+        logger.debug("Transitioning to GET_FEEDBACK after prediction")
         return GET_FEEDBACK
 
     except Exception as e:
-        print(f"Error in predict_next: {str(e)}")
-        if update.callback_query:
-            update.callback_query.message.reply_text(
-                f"⚠️ An error occurred during prediction: {str(e)}. Please reset and start over.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Reset", callback_data="reset"), InlineKeyboardButton("🚪 Exit", callback_data="exit")]])
-            )
-        else:
-            update.message.reply_text(
-                f"⚠️ An error occurred during prediction: {str(e)}. Please reset and start over.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Reset", callback_data="reset"), InlineKeyboardButton("🚪 Exit", callback_data="exit")]])
-            )
-        print("Debug: Transitioning to GET_OUTCOMES due to error in predict_next")
+        logger.error(f"Error in predict_next: {str(e)}")
+        error_msg = f"⚠️ An error occurred during prediction: {str(e)}. Please reset and start over."
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Reset", callback_data="reset"), InlineKeyboardButton("🚪 Exit", callback_data="exit")]])
+        sent_message = (update.callback_query.message.reply_text if update.callback_query else update.message.reply_text)(
+            error_msg, reply_markup=reply_markup
+        )
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].append(sent_message.message_id)
+        logger.debug("Transitioning to GET_OUTCOMES due to error in predict_next")
         return GET_OUTCOMES
 
 # Handle feedback
 def get_feedback(update, context):
-    check_inactivity(update, context)  # Check inactivity before processing
+    check_inactivity(update, context)
     query = update.callback_query
     if not query:
-        return GET_FEEDBACK  # Ignore if not a callback query
+        return GET_FEEDBACK
 
     current_time = time.time()
     last_feedback_time = context.user_data.get('last_feedback_time', 0)
-    if current_time - last_feedback_time < 1.0:  # Debounce: Ignore clicks within 1 second
+    if current_time - last_feedback_time < 1.0:
         query.answer("Please wait a moment before clicking again.")
-        print(f"Debug: Debounced feedback click at {current_time}, last at {last_feedback_time}")
+        logger.debug(f"Debounced feedback click at {current_time}, last at {last_feedback_time}")
         return GET_FEEDBACK
 
-    query.answer()  # Acknowledge the click immediately
-    print(f"Debug: Entered get_feedback at {current_time}")
+    query.answer()
+    logger.debug(f"Entered get_feedback at {current_time}")
 
     if 'last_predicted' not in context.user_data:
-        # Safeguard: If no prediction exists, reset and start over
         reset_state(context)
         sent_message = query.message.reply_text(
             "⚠️ No prediction found. Session may have been reset. Starting over.\nWhat was outcome 1?",
@@ -565,7 +525,7 @@ def get_feedback(update, context):
         )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        print("Debug: Transitioning to GET_OUTCOMES due to missing last_predicted")
+        logger.debug("Transitioning to GET_OUTCOMES due to missing last_predicted")
         return GET_OUTCOMES
 
     predicted = context.user_data['last_predicted']
@@ -580,19 +540,19 @@ def get_feedback(update, context):
         actual = predicted
         context.user_data['current_streak_length'] += 1
         context.user_data['max_streak_length'] = max(context.user_data['max_streak_length'], context.user_data['current_streak_length'])
-        context.user_data['loss_streak_length'] = 0  # Reset loss streak on win
-        context.user_data['apology_triggered'] = False  # Reset apology flag on win
+        context.user_data['loss_streak_length'] = 0
+        context.user_data['apology_triggered'] = False
         was_correct = True
-        print("Debug: Feedback yes, win recorded")
+        logger.debug("Feedback yes, win recorded")
     elif query.data == "feedback_no":
         context.user_data['reward'] -= 1
         context.user_data['wins'].append(0)
         context.user_data['losses'].append(1)
         actual = 'Small' if predicted == 'Big' else 'Big'
         context.user_data['current_streak_length'] = 0
-        context.user_data['loss_streak_length'] += 1  # Increment loss streak on loss
+        context.user_data['loss_streak_length'] += 1
         was_correct = False
-        print("Debug: Feedback no, loss recorded")
+        logger.debug("Feedback no, loss recorded")
     elif query.data == "reset":
         reset_state(context)
         sent_message = query.message.reply_text(
@@ -601,7 +561,7 @@ def get_feedback(update, context):
         )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        print("Debug: Reset triggered, transitioning to GET_OUTCOMES")
+        logger.debug("Reset triggered, transitioning to GET_OUTCOMES")
         return GET_OUTCOMES
     elif query.data == "clear_history":
         bot = context.bot
@@ -610,8 +570,7 @@ def get_feedback(update, context):
             try:
                 bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception as e:
-                print(f"Failed to delete message {msg_id}: {e}")
-                continue
+                logger.error(f"Failed to delete message {msg_id}: {e}")
         context.user_data['all_message_ids'] = []
         context.user_data['message_ids'] = []
         sent_message = query.message.reply_text(
@@ -620,7 +579,7 @@ def get_feedback(update, context):
         )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        print("Debug: Cleared history, transitioning to GET_OUTCOMES")
+        logger.debug("Cleared history, transitioning to GET_OUTCOMES")
         return GET_OUTCOMES
     elif query.data == "exit":
         return exit_user(update, context)
@@ -628,36 +587,28 @@ def get_feedback(update, context):
         query.answer("Button disabled, please wait.")
         return GET_FEEDBACK
     else:
-        sent_message = query.message.reply_text("⚠️ Please select 'Yes' or 'No'.",
-                                               reply_markup=get_feedback_keyboard())
+        sent_message = query.message.reply_text("⚠️ Please select 'Yes' or 'No'.", reply_markup=get_feedback_keyboard())
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        print("Debug: Invalid feedback, staying in GET_FEEDBACK")
+        logger.debug("Invalid feedback, staying in GET_FEEDBACK")
         return GET_FEEDBACK
 
-    # Update history
     context.user_data['history'].append(actual)
-    if len(context.user_data['history']) > 10:  # Limit to last 10 outcomes
+    if len(context.user_data['history']) > 10:
         context.user_data['history'] = context.user_data['history'][-10:]
     context.user_data['step'] = len(context.user_data['history'])
 
-    # Check for 10 wins and handle accordingly
     if context.user_data['correct'] == 10:
-        # Delete all stored message IDs
         bot = context.bot
         chat_id = query.message.chat_id
         for msg_id in context.user_data['message_ids']:
             try:
                 bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception as e:
-                print(f"Failed to delete message {msg_id}: {e}")
-                continue
-
-        sent_message = query.message.reply_text("🎉 **10 Wins Complete!** 🏆\nStarting a new prediction cycle...",
-                                               parse_mode='Markdown')
+                logger.error(f"Failed to delete message {msg_id}: {e}")
+        sent_message = query.message.reply_text("🎉 **10 Wins Complete!** 🏆\nStarting a new prediction cycle...", parse_mode='Markdown')
         context.user_data['message_ids'] = []
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        # Generate new prediction
         history = context.user_data['history']
         predictions = context.user_data['predictions']
         wins = context.user_data['wins']
@@ -670,33 +621,28 @@ def get_feedback(update, context):
             context.user_data.get('current_streak_length', 0),
             context.user_data.get('max_streak_length', 0)
         )
-        sent_message = query.message.reply_text(prediction_message, parse_mode='Markdown',
-                                               reply_markup=get_feedback_keyboard())
-        context.user_data['message_ids'] = [sent_message.message_id]  # Reset with new message ID
+        sent_message = query.message.reply_text(prediction_message, parse_mode='Markdown', reply_markup=get_feedback_keyboard())
+        context.user_data['message_ids'] = [sent_message.message_id]
         context.user_data['all_message_ids'].append(sent_message.message_id)
         context.user_data['predictions'].append(predicted)
         context.user_data['total_bets'] += 1
-        print("Debug: 10 wins reached, transitioning to GET_FEEDBACK")
+        logger.debug("10 wins reached, transitioning to GET_FEEDBACK")
         return GET_FEEDBACK
     else:
-        # Adjust strategy based on streak and loss
         if context.user_data['play_with_streak'] and not was_correct:
-            context.user_data['play_with_streak'] = False  # Streak broken, revert to DQN
-        elif len(context.user_data['predictions']) >= 4:
-            last_four = context.user_data['predictions'][-4:]
-            if all(p == last_four[0] for p in last_four) and was_correct:
-                context.user_data['play_with_streak'] = True  # Continue playing with streak
+            context.user_data['play_with_streak'] = False
+        elif len(context.user_data['predictions']) >= 4 and all(p == context.user_data['predictions'][-4] for p in context.user_data['predictions'][-4:]) and was_correct:
+            context.user_data['play_with_streak'] = True
 
-        # Disable buttons after first click and confirm
         query.edit_message_reply_markup(reply_markup=get_feedback_keyboard(disabled=True))
         query.message.reply_text(f"✅ Feedback recorded: {actual}. Predicting next outcome...", reply_markup=None)
         context.user_data['last_feedback_time'] = current_time
-        print(f"Debug: Transitioning to PREDICT after feedback, time: {current_time}")
-        return predict_next(update, context)  # Transition to PREDICT state immediately
+        logger.debug(f"Transitioning to PREDICT after feedback, time: {current_time}")
+        return predict_next(update, context)
 
 # Handle skip feedback
 def skip_feedback(update, context):
-    check_inactivity(update, context)  # Check inactivity before processing
+    check_inactivity(update, context)
     query = update.callback_query
     query.answer()
     skip_count = context.user_data['skip_count']
@@ -706,7 +652,7 @@ def skip_feedback(update, context):
         step = int(step_str)
         actual = 'Big' if outcome == 'yes' else 'Small'
         context.user_data['history'].append(actual)
-        if len(context.user_data['history']) > 10:  # Limit to last 10 outcomes
+        if len(context.user_data['history']) > 10:
             context.user_data['history'] = context.user_data['history'][-10:]
         context.user_data['step'] += 1
         context.user_data['skip_count'] += 1
@@ -716,16 +662,15 @@ def skip_feedback(update, context):
                 f"📝 Skipped bet {step} recorded: {actual}. What was the outcome of skipped bet {step + 1}?",
                 reply_markup=get_skip_feedback_keyboard(step + 1)
             )
-            print(f"Debug: Staying in SKIP_FEEDBACK, skip_count = {skip_count + 1}")
+            logger.debug(f"Staying in SKIP_FEEDBACK, skip_count = {skip_count + 1}")
             return SKIP_FEEDBACK
         else:
             context.user_data['skip_count'] = 0
-            context.user_data['predictions'] = context.user_data['predictions'][:-2]  # Remove last 2 predictions to break streak
+            context.user_data['predictions'] = context.user_data['predictions'][:-2]
             query.edit_message_text("✅ Skipping complete! Predicting the next outcome...")
-            print(f"Debug: Skipping complete, predictions reset to {context.user_data['predictions']}")
-            print(f"Debug: Current history after skipping: {context.user_data['history']}")
-            # Force a new prediction immediately
-            return predict_next(update, context)  # Directly call predict_next instead of just transitioning
+            logger.debug(f"Skipping complete, predictions reset to {context.user_data['predictions']}")
+            logger.debug(f"Current history after skipping: {context.user_data['history']}")
+            return predict_next(update, context)
     elif query.data == "reset":
         reset_state(context)
         sent_message = query.message.reply_text(
@@ -734,7 +679,7 @@ def skip_feedback(update, context):
         )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        print("Debug: Reset triggered, transitioning to GET_OUTCOMES")
+        logger.debug("Reset triggered, transitioning to GET_OUTCOMES")
         return GET_OUTCOMES
     elif query.data == "clear_history":
         bot = context.bot
@@ -743,8 +688,7 @@ def skip_feedback(update, context):
             try:
                 bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception as e:
-                print(f"Failed to delete message {msg_id}: {e}")
-                continue
+                logger.error(f"Failed to delete message {msg_id}: {e}")
         context.user_data['all_message_ids'] = []
         context.user_data['message_ids'] = []
         sent_message = query.message.reply_text(
@@ -753,17 +697,17 @@ def skip_feedback(update, context):
         )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-        print("Debug: Cleared history, transitioning to GET_OUTCOMES")
+        logger.debug("Cleared history, transitioning to GET_OUTCOMES")
         return GET_OUTCOMES
     elif query.data == "exit":
         return exit_user(update, context)
 
-    print("Debug: Staying in SKIP_FEEDBACK (default case)")
+    logger.debug("Staying in SKIP_FEEDBACK (default case)")
     return SKIP_FEEDBACK
 
 # Handle /stats command
 def stats(update, context):
-    check_inactivity(update, context)  # Check inactivity before processing
+    check_inactivity(update, context)
     correct = context.user_data.get('correct', 0)
     total_bets = context.user_data.get('total_bets', 0)
     reward = context.user_data.get('reward', 0)
@@ -796,9 +740,8 @@ def stats(update, context):
     sent_message = update.message.reply_text(stats_message, parse_mode='Markdown',
                                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Reset", callback_data="reset"), InlineKeyboardButton("🚪 Exit", callback_data="exit")]]))
     context.user_data['message_ids'].append(sent_message.message_id)
-    context.user_data['all_message_ids'].append(update.message.message_id)
-    context.user_data['all_message_ids'].append(sent_message.message_id)
-    return GET_OUTCOMES  # Stay in GET_OUTCOMES to allow further interaction
+    context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
+    return GET_OUTCOMES
 
 # Handle /stop command
 def stop(update, context):
@@ -810,6 +753,7 @@ def stop(update, context):
 # Error handler
 def error_handler(update, context):
     error = context.error
+    logger.error(f"Error occurred: {str(error)}")
     if update and update.message:
         sent_message = update.message.reply_text(
             f"⚠️ An error occurred: {str(error)}. Please reset and start over.",
@@ -817,26 +761,25 @@ def error_handler(update, context):
         )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
-    else:
-        print(f"Error occurred without update: {str(error)}")
     if "Conflict: terminated by other getUpdates request" in str(error):
-        print("Conflict detected. Please ensure only one bot instance is running.")
+        logger.error("Conflict detected. Please ensure only one bot instance is running.")
 
 # Cleanup function to remove lock file on exit
 def cleanup():
     if os.path.exists(LOCK_FILE):
         os.remove(LOCK_FILE)
-        print(f"Lock file {LOCK_FILE} removed.")
+        logger.info(f"Lock file {LOCK_FILE} removed.")
 
 # Main function to start the bot
 def main():
-    # Start Flask in a thread (minimal addition for Render)
+    logger.info("Starting Flask thread...")
     flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=8080))
     flask_thread.daemon = True
     flask_thread.start()
-    print("Flask server started on port 8080 for keep-alive")
+    logger.info("Flask server started on port 8080 for keep-alive")
 
     try:
+        logger.info("Initializing Telegram bot...")
         updater = Updater("7942589435:AAFPSKeu-9DXcEw2x7lLKHkur2K8po0Y2eU", use_context=True)
         dp = updater.dispatcher
 
@@ -856,7 +799,7 @@ def main():
                     CallbackQueryHandler(skip_feedback, pattern='^skip_.*$|^reset$|^clear_history$|^exit$')
                 ]
             },
-            fallbacks=[CommandHandler('start', start), CommandHandler('stats', stats)]  # Allow /start and /stats to restart or check stats
+            fallbacks=[CommandHandler('start', start), CommandHandler('stats', stats)]
         )
 
         dp.add_handler(conv_handler)
@@ -864,12 +807,14 @@ def main():
         dp.add_handler(CommandHandler("stop", stop))
         dp.add_error_handler(error_handler)
 
-        print('Bot started')  # Moved before polling
+        logger.info("Bot started, beginning polling...")
         updater.start_polling()
         updater.idle()
     except KeyboardInterrupt:
+        logger.info("Bot stopped via KeyboardInterrupt")
         cleanup()
     except Exception as e:
+        logger.error(f"Error in main: {str(e)}")
         cleanup()
         raise e
     finally:
