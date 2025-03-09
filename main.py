@@ -7,16 +7,18 @@ import itertools
 import warnings
 import time
 import os
-
+from stable_baselines3.common.utils import get_schedule_fn
 print("Starting to load DQN model...")
 try:
-    dqn_model = DQN.load('dqn_betting_model')
+    custom_objects = {
+        'lr_schedule': get_schedule_fn(0.001),
+        'exploration_schedule': get_schedule_fn(0.1)
+    }
+    dqn_model = DQN.load('dqn_betting_model', custom_objects=custom_objects)
     print("Model loaded successfully.")
-    print(f"DQN model observation space: {dqn_model.observation_space}")
 except Exception as e:
     print(f"Failed to load model: {str(e)}")
-    raise  # Ensure error shows in logs
-
+    raise
 # Suppress the specific warning
 warnings.filterwarnings("ignore", category=UserWarning, module="telegram.ext.conversationhandler")
 
