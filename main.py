@@ -8,6 +8,15 @@ import warnings
 import time
 import os
 
+print("Starting to load DQN model...")
+try:
+    dqn_model = DQN.load('dqn_betting_model')
+    print("Model loaded successfully.")
+    print(f"DQN model observation space: {dqn_model.observation_space}")
+except Exception as e:
+    print(f"Failed to load model: {str(e)}")
+    raise  # Ensure error shows in logs
+
 # Suppress the specific warning
 warnings.filterwarnings("ignore", category=UserWarning, module="telegram.ext.conversationhandler")
 
