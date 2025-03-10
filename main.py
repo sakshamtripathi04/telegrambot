@@ -60,10 +60,10 @@ GET_OUTCOMES, PREDICT, GET_FEEDBACK, SKIP_FEEDBACK = range(4)
 
 # Global messages
 APOLOGY_MESSAGE = (  
-    "😔 **Maafi!** \n Hum continuously 6 baar haar chuke hain, aur yeh dil se bura lag raha hai. 💔\n\n"
+    "😔 Maafi! \n Hum continuously 6 baar haar chuke hain, aur yeh dil se bura lag raha hai. 💔\n\n"
     "Mujhe pata hai ki yeh phase tough hai, lekin tension mat lo! Main full effort dal raha hoon recovery ke liye. 🔥\n"
     "Bas thodi si patience rakho, shayad agla turn humare favor mein ho! 🍀\n\n"
-    "Agar aap chahein toh hum **aage continue kar sakte hain 🔄,** ya phir reset dabake ek naya start le sakte hain. 🔃\n"  
+    "Agar aap chahein toh hum aage continue kar sakte hain 🔄, ya phir reset dabake ek naya start le sakte hain. 🔃\n"  
 )
 
 INACTIVITY_WARNING = (
@@ -165,8 +165,8 @@ def get_skip_feedback_keyboard(step):
 
 # Format the prediction message with exact spacing
 def format_prediction_message(history, predictions, wins, predicted, loss_freq_6, current_streak_length, max_streak_length):
-    last_bet_result = f"**Last Bet:** {predictions[-1]} {'✅' if wins[-1] else '❌'}\n" if predictions and wins else ""
-    history_display = "**Bet History (Last 10):**\n\n"
+    last_bet_result = f"<b>Last Bet:</b> {predictions[-1]} {'✅' if wins[-1] else '❌'}\n" if predictions and wins else ""
+    history_display = "<b>Bet History (Last 10):</b>\n\n"
     if len(predictions) == 0:
         history_display += "No bets yet.\n"
     else:
@@ -175,12 +175,17 @@ def format_prediction_message(history, predictions, wins, predicted, loss_freq_6
             bet = predictions[i]
             result = "💸" * (7 if wins[i] else 0)
             history_display += f"{bet} {result}\n"
-    streak_info = f"**Current Streak:** {current_streak_length} wins | **Max Streak:** {max_streak_length} wins\n"
-    loss_freq_display = f"**6 Consecutive Losses Frequency:** {loss_freq_6}\n"
-    prediction_display = f"🎯 **Next Prediction: {predicted.upper()} 🎯\n"
+    streak_info = f"<b>Current Streak:</b> {current_streak_length} wins | <b>Max Streak:</b> {max_streak_length} wins\n"
+    loss_freq_display = f"<b>6 Consecutive Losses Frequency:</b> {loss_freq_6}\n"
+   prediction_display = (
+        f"\n"
+        f"═══════════════════════\n"
+        f"**NEXT PREDICTION: 🎯{predicted.upper()}**\n"  # Bold + CAPS
+        f"═══════════════════════\n"
+    )
     message = (
-        "🎰 **WIN GO 1 MIN** 🎰\n\n"
-        "🌟 **MAINTAIN LEVEL 7** 🌟\n\n"
+        "🎰 <b>WIN GO 1 MIN</b> 🎰\n"
+        "🌟 <b>MAINTAIN LEVEL 7</b> 🌟\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{last_bet_result}"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -192,11 +197,10 @@ def format_prediction_message(history, predictions, wins, predicted, loss_freq_6
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"\n{prediction_display}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "💰 **Keep Earning!** 💰\n"
+        "💰 <b>Keep Earning!</b> 💰\n"
         "━━━━━━━━━━━━━━━━━━━━━━━"
     )
     return message
-
 # Calculate streak frequencies
 def calculate_streak_frequencies(losses, wins):
     loss_streaks = [sum(1 for _ in g) for k, g in itertools.groupby(losses) if k == 1]
