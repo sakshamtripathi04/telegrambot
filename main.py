@@ -44,12 +44,20 @@ else:
 
 # Load or initialize users database
 if os.path.exists(USERS_FILE):
-    with open(USERS_FILE, 'r') as f:
-        users_db = json.load(f)
+    try:
+        with open(USERS_FILE, 'r') as f:
+            users_db = json.load(f)
+            if not isinstance(users_db, dict):  # Ensure valid dictionary format
+                raise ValueError("Invalid users.json format")
+    except (json.JSONDecodeError, ValueError):
+        users_db = {}  # Reset to empty dictionary if corrupted
+        with open(USERS_FILE, 'w') as f:
+            json.dump(users_db, f)
 else:
     users_db = {}
     with open(USERS_FILE, 'w') as f:
         json.dump(users_db, f)
+
 
 # Hardcoded admin credentials
 ADMIN_USERNAME = "admin123"
