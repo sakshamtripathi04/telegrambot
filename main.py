@@ -177,10 +177,10 @@ def format_prediction_message(history, predictions, wins, predicted, loss_freq_6
             history_display += f"{bet} {result}\n"
     streak_info = f"**Current Streak:** {current_streak_length} wins | **Max Streak:** {max_streak_length} wins\n"
     loss_freq_display = f"**6 Consecutive Losses Frequency:** {loss_freq_6}\n"
-    prediction_display = f"🎯 **Next Prediction:** {predicted.upper()} 🎯\n"
+    prediction_display = f"🎯 **Next Prediction: {predicted.upper()} 🎯\n"
     message = (
-        "🎰 **WIN GO 1 MIN** 🎰\n"
-        "🌟 **MAINTAIN LEVEL 7** 🌟\n"
+        "🎰 **WIN GO 1 MIN** 🎰\n\n"
+        "🌟 **MAINTAIN LEVEL 7** 🌟\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{last_bet_result}"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -191,6 +191,7 @@ def format_prediction_message(history, predictions, wins, predicted, loss_freq_6
         f"{loss_freq_display}"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"\n{prediction_display}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "💰 **Keep Earning!** 💰\n"
         "━━━━━━━━━━━━━━━━━━━━━━━"
     )
