@@ -1,12 +1,13 @@
 import pandas as pd
 import numpy as np
 from stable_baselines3 import DQN
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, Filters
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import itertools
 import warnings
 import time
 import os
+import json
 from stable_baselines3.common.utils import get_schedule_fn
 from flask import Flask
 from threading import Thread
@@ -25,11 +26,12 @@ app = Flask(__name__)
 def health_check():
     return "OK", 200
 
-# Suppress the specific warning
+# Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="telegram.ext.conversationhandler")
 
-# Lock file to prevent multiple instances
+# Lock file and users file
 LOCK_FILE = "bot.lock"
+USERS_FILE = "users.json"
 
 # Check if another instance is running
 if os.path.exists(LOCK_FILE):
@@ -40,7 +42,20 @@ else:
         f.write(str(os.getpid()))
     logger.info(f"Lock file created with PID {os.getpid()}")
 
-# Load the trained model with custom_objects
+# Load or initialize users database
+if os.path.exists(USERS_FILE):
+    with open(USERS_FILE, 'r') as f:
+        users_db = json.load(f)
+else:
+    users_db = {}
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users_db, f)
+
+# Hardcoded admin credentials
+ADMIN_USERNAME = "admin123"
+ADMIN_PASSWORD = "secret456"
+
+# Load the trained model
 logger.info("Starting to load DQN model...")
 try:
     custom_objects = {
@@ -56,14 +71,14 @@ except Exception as e:
     exit(1)
 
 # States for conversation
-GET_OUTCOMES, PREDICT, GET_FEEDBACK, SKIP_FEEDBACK = range(4)
+LOGIN, LOGIN_USERNAME, LOGIN_PASSWORD, SIGNUP_USERNAME, SIGNUP_PASSWORD, ADMIN_MENU, GET_OUTCOMES, PREDICT, GET_FEEDBACK, SKIP_FEEDBACK = range(10)
 
 # Global messages
-APOLOGY_MESSAGE = (  
+APOLOGY_MESSAGE = (
     "😔 Maafi! \n Hum continuously 6 baar haar chuke hain, aur yeh dil se bura lag raha hai. 💔\n\n"
     "Mujhe pata hai ki yeh phase tough hai, lekin tension mat lo! Main full effort dal raha hoon recovery ke liye. 🔥\n"
     "Bas thodi si patience rakho, shayad agla turn humare favor mein ho! 🍀\n\n"
-    "Agar aap chahein toh hum aage continue kar sakte hain 🔄, ya phir reset dabake ek naya start le sakte hain. 🔃\n"  
+    "Agar aap chahein toh hum aage continue kar sakte hain 🔄, ya phir reset dabake ek naya start le sakte hain. 🔃\n"
 )
 
 INACTIVITY_WARNING = (
@@ -76,7 +91,7 @@ INACTIVITY_CLEANUP = (
     "Restart the bot with `/start` to begin anew."
 )
 
-# Function to preprocess 10 recent outcomes and pad to 20 timesteps
+# Helper functions
 def prepare_live_input(recent_outcomes, lookback=20):
     start_time = time.time()
     if not recent_outcomes:
@@ -93,7 +108,6 @@ def prepare_live_input(recent_outcomes, lookback=20):
     logger.debug(f"prepare_live_input took {end_time - start_time:.4f} seconds for {len(recent_outcomes)} outcomes")
     return features.astype(np.float32)
 
-# Function to predict next outcome using DQN with timing
 def predict_next_outcome(recent_outcomes):
     start_time = time.time()
     try:
@@ -112,7 +126,6 @@ def predict_next_outcome(recent_outcomes):
         logger.error(f"Error in predict_next_outcome: {str(e)}")
         raise
 
-# Create inline keyboard for outcomes
 def get_outcome_keyboard(step):
     keyboard = [
         [
@@ -129,7 +142,6 @@ def get_outcome_keyboard(step):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# Create inline keyboard for feedback with disabled state
 def get_feedback_keyboard(disabled=False):
     keyboard = [
         [
@@ -146,7 +158,6 @@ def get_feedback_keyboard(disabled=False):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# Create inline keyboard for skip feedback
 def get_skip_feedback_keyboard(step):
     keyboard = [
         [
@@ -163,7 +174,22 @@ def get_skip_feedback_keyboard(step):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# Format the prediction message with exact spacing
+def get_login_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("Login", callback_data="login")],
+        [InlineKeyboardButton("Signup", callback_data="signup")],
+        [InlineKeyboardButton("Exit", callback_data="exit")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_admin_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("Prediction", callback_data="admin_predict")],
+        [InlineKeyboardButton("User Logs", callback_data="admin_logs")],
+        [InlineKeyboardButton("Exit", callback_data="exit")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 def format_prediction_message(history, predictions, wins, predicted, loss_freq_6, current_streak_length, max_streak_length):
     last_bet_result = f"<b>Last Bet:</b> {predictions[-1]} {'✅' if wins[-1] else '❌'}\n" if predictions and wins else ""
     history_display = "<b>Bet History (Last 10):</b>\n\n"
@@ -177,10 +203,10 @@ def format_prediction_message(history, predictions, wins, predicted, loss_freq_6
             history_display += f"{bet} {result}\n"
     streak_info = f"<b>Current Streak:</b> {current_streak_length} wins | <b>Max Streak:</b> {max_streak_length} wins\n"
     loss_freq_display = f"<b>6 Consecutive Losses Frequency:</b> {loss_freq_6}\n"
-   prediction_display = (
+    prediction_display = (
         f"\n"
         f"═══════════════════════\n"
-        f"**NEXT PREDICTION: 🎯{predicted.upper()}**\n"  # Bold + CAPS
+        f"**NEXT PREDICTION: 🎯{predicted.upper()}**\n"
         f"═══════════════════════\n"
     )
     message = (
@@ -201,7 +227,7 @@ def format_prediction_message(history, predictions, wins, predicted, loss_freq_6
         "━━━━━━━━━━━━━━━━━━━━━━━"
     )
     return message
-# Calculate streak frequencies
+
 def calculate_streak_frequencies(losses, wins):
     loss_streaks = [sum(1 for _ in g) for k, g in itertools.groupby(losses) if k == 1]
     win_streaks = [sum(1 for _ in g) for k, g in itertools.groupby(wins) if k == 1]
@@ -221,7 +247,6 @@ def calculate_streak_frequencies(losses, wins):
             win_freq[6] += 1
     return loss_freq, win_freq, max_losses, max_wins
 
-# Reset function to clear state and restart
 def reset_state(context):
     chat_id = context.user_data.get('chat_id', 'unknown')
     context.user_data.clear()
@@ -251,7 +276,6 @@ def reset_state(context):
     })
     logger.info(f"Reset state for user {chat_id} at {time.ctime()}")
 
-# Function to exit user session
 def exit_user(update, context):
     if update.callback_query:
         query = update.callback_query
@@ -264,7 +288,6 @@ def exit_user(update, context):
     context.bot.send_message(chat_id=chat_id, text="🚪 Session exited. All processes cleared. Restart with `/start`.")
     return ConversationHandler.END
 
-# Function to check inactivity
 def check_inactivity(update, context):
     chat_id = update.effective_chat.id
     current_time = time.time()
@@ -289,7 +312,6 @@ def check_inactivity(update, context):
     context.user_data['inactivity_warning_sent'] = False
     return None
 
-# Function to send apology message
 def send_apology_message(update, context):
     logger.debug("Sending apology message")
     if update.callback_query:
@@ -318,19 +340,160 @@ def start(update, context):
     context.user_data['chat_id'] = chat_id
     reset_state(context)
     
-    welcome_message = f"🎉 Hello {user.first_name}! Welcome to **Shitty Predicts** 🎉\nWhat was outcome 1?"
+    welcome_message = f"🎉 Hello {user.first_name}! Welcome to **Shitty Predicts** 🎉\nPlease login or signup to continue."
     sent_welcome = update.message.reply_text(
         welcome_message,
         parse_mode='Markdown',
-        reply_markup=get_outcome_keyboard(1)
+        reply_markup=get_login_keyboard()
     )
     context.user_data['message_ids'].append(sent_welcome.message_id)
     context.user_data['all_message_ids'].extend([update.message.message_id, sent_welcome.message_id])
     context.user_data['last_active_time'] = time.time()
-    logger.debug(f"Transitioning to GET_OUTCOMES for user {chat_id}")
+    logger.debug(f"Transitioning to LOGIN for user {chat_id}")
+    return LOGIN
+
+# Handle login/signup selection
+def login(update, context):
+    query = update.callback_query
+    query.answer()
+    chat_id = query.message.chat_id
+
+    if query.data == "login":
+        sent_message = query.edit_message_text("Please enter your username:")
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].append(sent_message.message_id)
+        logger.debug(f"User {chat_id} chose login, transitioning to LOGIN_USERNAME")
+        return LOGIN_USERNAME
+    elif query.data == "signup":
+        sent_message = query.edit_message_text("Please Choose a Username: ")
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].append(sent_message.message_id)
+        logger.debug(f"User {chat_id} chose signup, transitioning to SIGNUP_USERNAME")
+        return SIGNUP_USERNAME
+    elif query.data == "exit":
+        return exit_user(update, context)
+
+    return LOGIN
+
+def handle_login_username(update, context):
+    username = update.message.text.strip()
+    context.user_data['temp_username'] = username
+    chat_id = update.message.chat_id
+    sent_message = update.message.reply_text("Please enter your Password: ")
+    context.user_data['message_ids'].append(sent_message.message_id)
+    context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
+    logger.debug(f"User {chat_id} entered username: {username}, transitioning to LOGIN_PASSWORD")
+    return LOGIN_PASSWORD
+
+def handle_login_password(update, context):
+    password = update.message.text.strip()
+    username = context.user_data.get('temp_username')
+    chat_id = update.message.chat_id
+
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        logger.info(f"Admin login successful for {username} at {time.ctime()}")
+        users_db[username] = users_db.get(username, {"password": password, "logins": []})
+        users_db[username]["logins"].append(time.ctime())
+        with open(USERS_FILE, 'w') as f:
+            json.dump(users_db, f)
+        context.user_data['is_admin'] = True
+        sent_message = update.message.reply_text(
+            "✅ Admin login successful! Choose an option:",
+            reply_markup=get_admin_menu_keyboard()
+        )
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
+        logger.debug(f"Admin {chat_id} logged in, transitioning to ADMIN_MENU")
+        return ADMIN_MENU
+    elif username in users_db and users_db[username]["password"] == password:
+        logger.info(f"User login successful for {username} at {time.ctime()}")
+        users_db[username]["logins"].append(time.ctime())
+        with open(USERS_FILE, 'w') as f:
+            json.dump(users_db, f)
+        context.user_data['username'] = username
+        sent_message = update.message.reply_text(
+            f"✅ Login successful, {username}! What was outcome 1?",
+            reply_markup=get_outcome_keyboard(1)
+        )
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
+        logger.debug(f"User {chat_id} logged in, transitioning to GET_OUTCOMES")
+        return GET_OUTCOMES
+    else:
+        sent_message = update.message.reply_text(
+            "❌ Invalid username or password. Please try again or signup.",
+            reply_markup=get_login_keyboard()
+        )
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
+        logger.debug(f"Login failed for {username}, returning to LOGIN")
+        return LOGIN
+
+def signup_username(update, context):
+    username = update.message.text.strip()
+    chat_id = update.message.chat_id
+    if username in users_db or username == ADMIN_USERNAME:
+        sent_message = update.message.reply_text("❌ Username already taken. Please choose another:")
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
+        logger.debug(f"Username {username} taken for {chat_id}")
+        return SIGNUP_USERNAME
+    context.user_data['temp_username'] = username
+    sent_message = update.message.reply_text("Please enter a password:")
+    context.user_data['message_ids'].append(sent_message.message_id)
+    context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
+    logger.debug(f"User {chat_id} chose username: {username}")
+    return SIGNUP_PASSWORD
+
+def signup_password(update, context):
+    password = update.message.text.strip()
+    username = context.user_data['temp_username']
+    chat_id = update.message.chat_id
+    users_db[username] = {"password": password, "logins": [time.ctime()]}
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users_db, f)
+    context.user_data['username'] = username
+    sent_message = update.message.reply_text(
+        f"✅ Signup successful, {username}! What was outcome 1?",
+        reply_markup=get_outcome_keyboard(1)
+    )
+    context.user_data['message_ids'].append(sent_message.message_id)
+    context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
+    logger.debug(f"User {chat_id} signed up, transitioning to GET_OUTCOMES")
     return GET_OUTCOMES
 
-# Handle outcome selection
+def admin_menu(update, context):
+    query = update.callback_query
+    query.answer()
+    chat_id = query.message.chat_id
+
+    if query.data == "admin_predict":
+        sent_message = query.edit_message_text(
+            "✅ Entering prediction mode. What was outcome 1?",
+            reply_markup=get_outcome_keyboard(1)
+        )
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].append(sent_message.message_id)
+        logger.debug(f"Admin {chat_id} chose prediction, transitioning to GET_OUTCOMES")
+        return GET_OUTCOMES
+    elif query.data == "admin_logs":
+        logs = "📋 **User Logs** 📋\n━━━━━━━━━━━━━━━━━━━━━━━\n"
+        for username, data in users_db.items():
+            if username != ADMIN_USERNAME:
+                logs += f"**Username:** {username}\n"
+                logs += f"**Login Count:** {len(data['logins'])}\n"
+                logs += f"**Last Login:** {data['logins'][-1] if data['logins'] else 'N/A'}\n"
+                logs += "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        sent_message = query.edit_message_text(logs, parse_mode='Markdown')
+        context.user_data['message_ids'].append(sent_message.message_id)
+        context.user_data['all_message_ids'].append(sent_message.message_id)
+        logger.debug(f"Admin {chat_id} viewed user logs")
+        return ADMIN_MENU
+    elif query.data == "exit":
+        return exit_user(update, context)
+
+    return ADMIN_MENU
+
 def get_outcomes(update, context):
     check_inactivity(update, context)
     query = update.callback_query
@@ -393,7 +556,6 @@ def get_outcomes(update, context):
     logger.debug("Staying in GET_OUTCOMES (default case)")
     return GET_OUTCOMES
 
-# Predict the next outcome
 def predict_next(update, context):
     check_inactivity(update, context)
     query = update.callback_query
@@ -406,10 +568,9 @@ def predict_next(update, context):
         logger.error(f"history length is {len(history)}, expected at least 10. History: {history}")
         error_msg = "⚠️ Internal error: Not enough history to make a prediction. Please provide more outcomes or reset."
         reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Reset", callback_data="reset"), InlineKeyboardButton("🚪 Exit", callback_data="exit")]])
-        if update.callback_query:
-            sent_message = update.callback_query.message.reply_text(error_msg, reply_markup=reply_markup)
-        else:
-            sent_message = update.message.reply_text(error_msg, reply_markup=reply_markup)
+        sent_message = (update.callback_query.message.reply_text if update.callback_query else update.message.reply_text)(
+            error_msg, reply_markup=reply_markup
+        )
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
         logger.debug("Transitioning to GET_OUTCOMES due to insufficient history")
@@ -481,7 +642,7 @@ def predict_next(update, context):
         logger.debug("Sending prediction message")
         send_start = time.time()
         sent_message = (update.callback_query.message.reply_text if update.callback_query else update.message.reply_text)(
-            prediction_message, parse_mode='Markdown', reply_markup=get_feedback_keyboard()
+            prediction_message, parse_mode='HTML', reply_markup=get_feedback_keyboard()
         )
         send_end = time.time()
         logger.debug(f"Sending message took {send_end - send_start:.4f} seconds")
@@ -505,7 +666,6 @@ def predict_next(update, context):
         logger.debug("Transitioning to GET_OUTCOMES due to error in predict_next")
         return GET_OUTCOMES
 
-# Handle feedback
 def get_feedback(update, context):
     check_inactivity(update, context)
     query = update.callback_query
@@ -626,7 +786,7 @@ def get_feedback(update, context):
             context.user_data.get('current_streak_length', 0),
             context.user_data.get('max_streak_length', 0)
         )
-        sent_message = query.message.reply_text(prediction_message, parse_mode='Markdown', reply_markup=get_feedback_keyboard())
+        sent_message = query.message.reply_text(prediction_message, parse_mode='HTML', reply_markup=get_feedback_keyboard())
         context.user_data['message_ids'] = [sent_message.message_id]
         context.user_data['all_message_ids'].append(sent_message.message_id)
         context.user_data['predictions'].append(predicted)
@@ -645,7 +805,6 @@ def get_feedback(update, context):
         logger.debug(f"Transitioning to PREDICT after feedback, time: {current_time}")
         return predict_next(update, context)
 
-# Handle skip feedback
 def skip_feedback(update, context):
     check_inactivity(update, context)
     query = update.callback_query
@@ -710,7 +869,6 @@ def skip_feedback(update, context):
     logger.debug("Staying in SKIP_FEEDBACK (default case)")
     return SKIP_FEEDBACK
 
-# Handle /stats command
 def stats(update, context):
     check_inactivity(update, context)
     correct = context.user_data.get('correct', 0)
@@ -748,14 +906,12 @@ def stats(update, context):
     context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
     return GET_OUTCOMES
 
-# Handle /stop command
 def stop(update, context):
     update.message.reply_text("Stopping the bot gracefully...")
     context.bot.stop_polling()
     cleanup()
     exit(0)
 
-# Error handler
 def error_handler(update, context):
     error = context.error
     logger.error(f"Error occurred: {str(error)}")
@@ -769,13 +925,11 @@ def error_handler(update, context):
     if "Conflict: terminated by other getUpdates request" in str(error):
         logger.error("Conflict detected. Please ensure only one bot instance is running.")
 
-# Cleanup function to remove lock file on exit
 def cleanup():
     if os.path.exists(LOCK_FILE):
         os.remove(LOCK_FILE)
         logger.info(f"Lock file {LOCK_FILE} removed.")
 
-# Main function with retry logic
 def main():
     logger.info("Bot process starting with PID %s", os.getpid())
     logger.info("Starting Flask thread...")
@@ -795,6 +949,24 @@ def main():
             conv_handler = ConversationHandler(
                 entry_points=[CommandHandler('start', start)],
                 states={
+                    LOGIN: [
+                        CallbackQueryHandler(login, pattern='^login$|^signup$|^exit$')
+                    ],
+                    LOGIN_USERNAME: [
+                        MessageHandler(Filters.text & ~Filters.command, handle_login_username)
+                    ],
+                    LOGIN_PASSWORD: [
+                        MessageHandler(Filters.text & ~Filters.command, handle_login_password)
+                    ],
+                    SIGNUP_USERNAME: [
+                        MessageHandler(Filters.text & ~Filters.command, signup_username)
+                    ],
+                    SIGNUP_PASSWORD: [
+                        MessageHandler(Filters.text & ~Filters.command, signup_password)
+                    ],
+                    ADMIN_MENU: [
+                        CallbackQueryHandler(admin_menu, pattern='^admin_predict$|^admin_logs$|^exit$')
+                    ],
                     GET_OUTCOMES: [
                         CallbackQueryHandler(get_outcomes, pattern='^outcome_.*$|^reset$|^clear_history$|^exit$')
                     ],
