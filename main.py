@@ -10,7 +10,7 @@ import os
 from stable_baselines3.common.utils import get_schedule_fn
 from flask import Flask
 from threading import Thread
-import logging  # Added for logging
+import logging
 
 # Set up logging
 logging.basicConfig(
@@ -770,55 +770,72 @@ def cleanup():
         os.remove(LOCK_FILE)
         logger.info(f"Lock file {LOCK_FILE} removed.")
 
-# Main function to start the bot
+# Main function with retry logic
 def main():
+    logger.info("Bot process starting with PID %s", os.getpid())
     logger.info("Starting Flask thread...")
     flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=8080))
     flask_thread.daemon = True
     flask_thread.start()
     logger.info("Flask server started on port 8080 for keep-alive")
 
-    try:
-        logger.info("Initializing Telegram bot...")
-        updater = Updater("7942589435:AAFPSKeu-9DXcEw2x7lLKHkur2K8po0Y2eU", use_context=True)
-        dp = updater.dispatcher
+    attempt = 0
+    max_attempts = 5
+    while attempt < max_attempts:
+        try:
+            logger.info("Attempt %d/%d: Initializing Telegram bot...", attempt + 1, max_attempts)
+            updater = Updater("7942589435:AAFPSKeu-9DXcEw2x7lLKHkur2K8po0Y2eU", use_context=True)
+            dp = updater.dispatcher
 
-        conv_handler = ConversationHandler(
-            entry_points=[CommandHandler('start', start)],
-            states={
-                GET_OUTCOMES: [
-                    CallbackQueryHandler(get_outcomes, pattern='^outcome_.*$|^reset$|^clear_history$|^exit$')
-                ],
-                PREDICT: [
-                    CallbackQueryHandler(predict_next)
-                ],
-                GET_FEEDBACK: [
-                    CallbackQueryHandler(get_feedback, pattern='^feedback_yes$|^feedback_no$|^reset$|^clear_history$|^exit$|^disabled$')
-                ],
-                SKIP_FEEDBACK: [
-                    CallbackQueryHandler(skip_feedback, pattern='^skip_.*$|^reset$|^clear_history$|^exit$')
-                ]
-            },
-            fallbacks=[CommandHandler('start', start), CommandHandler('stats', stats)]
-        )
+            conv_handler = ConversationHandler(
+                entry_points=[CommandHandler('start', start)],
+                states={
+                    GET_OUTCOMES: [
+                        CallbackQueryHandler(get_outcomes, pattern='^outcome_.*$|^reset$|^clear_history$|^exit$')
+                    ],
+                    PREDICT: [
+                        CallbackQueryHandler(predict_next)
+                    ],
+                    GET_FEEDBACK: [
+                        CallbackQueryHandler(get_feedback, pattern='^feedback_yes$|^feedback_no$|^reset$|^clear_history$|^exit$|^disabled$')
+                    ],
+                    SKIP_FEEDBACK: [
+                        CallbackQueryHandler(skip_feedback, pattern='^skip_.*$|^reset$|^clear_history$|^exit$')
+                    ]
+                },
+                fallbacks=[CommandHandler('start', start), CommandHandler('stats', stats)]
+            )
 
-        dp.add_handler(conv_handler)
-        dp.add_handler(CommandHandler("stats", stats))
-        dp.add_handler(CommandHandler("stop", stop))
-        dp.add_error_handler(error_handler)
+            dp.add_handler(conv_handler)
+            dp.add_handler(CommandHandler("stats", stats))
+            dp.add_handler(CommandHandler("stop", stop))
+            dp.add_error_handler(error_handler)
 
-        logger.info("Bot started, beginning polling...")
-        updater.start_polling()
-        updater.idle()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped via KeyboardInterrupt")
-        cleanup()
-    except Exception as e:
-        logger.error(f"Error in main: {str(e)}")
-        cleanup()
-        raise e
-    finally:
-        cleanup()
+            logger.info("Bot handlers registered, beginning polling...")
+            updater.start_polling(timeout=15, drop_pending_updates=True)
+            logger.info("Polling started successfully")
+            updater.idle()
+            logger.info("Bot stopped normally via idle")
+            break
+        except Exception as e:
+            attempt += 1
+            logger.error("Error in main loop (attempt %d/%d): %s", attempt, max_attempts, str(e))
+            if "Conflict" in str(e):
+                logger.warning("Telegram conflict detected, retrying in 5 seconds...")
+                time.sleep(5)
+                try:
+                    updater.stop()
+                except:
+                    pass
+            elif attempt >= max_attempts:
+                logger.error("Max attempts reached, giving up.")
+                cleanup()
+                raise e
+            else:
+                cleanup()
+                raise e
+        finally:
+            cleanup()
 
 if __name__ == '__main__':
     main()
