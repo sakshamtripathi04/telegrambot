@@ -359,7 +359,7 @@ def login(update, context):
     chat_id = query.message.chat_id
 
     if query.data == "login":
-        sent_message = query.edit_message_text("Please enter your username:")
+        sent_message = query.edit_message_text("🔹✨ Please Enter Your Username ✨🔹  ")
         context.user_data['message_ids'].append(sent_message.message_id)
         context.user_data['all_message_ids'].append(sent_message.message_id)
         logger.debug(f"User {chat_id} chose login, transitioning to LOGIN_USERNAME")
@@ -379,7 +379,7 @@ def handle_login_username(update, context):
     username = update.message.text.strip()
     context.user_data['temp_username'] = username
     chat_id = update.message.chat_id
-    sent_message = update.message.reply_text("Please enter your Password: ")
+    sent_message = update.message.reply_text("🔑🔒 Please Enter Your Password 🔒🔑 ")
     context.user_data['message_ids'].append(sent_message.message_id)
     context.user_data['all_message_ids'].extend([update.message.message_id, sent_message.message_id])
     logger.debug(f"User {chat_id} entered username: {username}, transitioning to LOGIN_PASSWORD")
