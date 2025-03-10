@@ -943,7 +943,7 @@ def main():
     while attempt < max_attempts:
         try:
             logger.info("Attempt %d/%d: Initializing Telegram bot...", attempt + 1, max_attempts)
-            updater = Updater("7942589435:AAFPSKeu-9DXcEw2x7lLKHkur2K8po0Y2eU", use_context=True)
+            updater = Updater("7942589435:AAHGGR7dKjfOl491rQ4Bmsz8RmujC4ZZvUk", use_context=True)
             dp = updater.dispatcher
 
             conv_handler = ConversationHandler(
